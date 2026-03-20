@@ -2,53 +2,72 @@ name: CD — Build & Push Docker Image
 
 on:
   push:
-    branches: [ main ]            # só na main, depois dos testes passarem
-  workflow_run:
-    workflows: ["CI — Tests"]     # só corre SE o CI passou
-    types: [completed]
     branches: [ main ]
 
 jobs:
-  build-and-push:
-    name: Build & Push to GHCR
+  test-and-build:
+    name: Test, Build & Push
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'push' }}
 
-    # Permissões para publicar no GitHub Container Registry
     permissions:
       contents: read
       packages: write
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER:     taskuser
+          POSTGRES_PASSWORD: taskpass
+          POSTGRES_DB:       taskdb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Metadata da imagem (nome, tags, labels)
-      - name: Extract Docker metadata
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Testes TÊM de passar antes do build
+      - name: Run tests
+        env:
+          DATABASE_URL: postgresql://taskuser:taskpass@localhost:5432/taskdb
+        run: pytest tests/ -v
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=sha,prefix=sha-          # tag com hash do commit: sha-abc1234
-            type=raw,value=latest         # tag latest sempre
-            type=semver,pattern={{version}} # tag de versão se fizeres git tag
+            type=sha,prefix=sha-
+            type=raw,value=latest
 
-      # Login no GitHub Container Registry
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}           # teu username GitHub
-          password: ${{ secrets.GITHUB_TOKEN }}   # token automático, não precisas criar
-
-      # Build e push da imagem
-      - name: Build and push Docker image
+      - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha      # cache do GitHub Actions — builds mais rápidos
+          cache-from: type=gha
           cache-to: type=gha,mode=max
